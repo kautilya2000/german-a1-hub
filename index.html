@@ -416,8 +416,8 @@
     </div>
     <div class="space-y-5">
       <div>
-        <label class="font-semibold text-sm" for="set-voice">German voice</label>
-        <select id="set-voice" class="sel w-full mt-1 py-2"></select>
+        <div class="font-semibold text-sm" id="set-voice-label">German voice <span class="font-normal text-slate-500">– press ▶ to hear each one, then pick the clearest</span></div>
+        <div id="set-voice" class="mt-2 space-y-1.5 max-h-64 overflow-y-auto pr-1" role="radiogroup" aria-labelledby="set-voice-label"></div>
         <p id="set-voice-hint" class="text-xs text-slate-500 mt-1"></p>
       </div>
       <div>
@@ -531,13 +531,21 @@ const Speech = (() => {
   let voices = []; let voice = null; let token = 0; let loaded = false; let lastWarn = 0;
   const alive = new Set();
   const listeners = new Set();
-  const PREF = ['Anna', 'Helena', 'Petra', 'Google Deutsch', 'Katja', 'Hedda', 'Markus', 'Yannick', 'Conrad', 'Amala', 'Marlene', 'Vicki', 'Hans', 'Stefan'];
+  // Novelty / low-quality voices that sound robotic or silly – never picked automatically
+  const NOVELTY = /\b(Eddy|Flo|Grandma|Grandpa|Reed|Rocko|Sandy|Shelley|Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|eSpeak)\b/i;
+  const HIGH = /premium|enhanced|erweitert|neural|natural|online|wavenet/i;
+  const GOOD_NAMES = /\b(Anna|Petra|Markus|Yannick|Helena|Katja|Hedda|Conrad|Amala|Killian|Florian|Seraphina|Marlene|Vicki|Hans|Stefan|Martin)\b/i;
+  function quality(v) {
+    if (/google/i.test(v.name) || HIGH.test(v.name)) return 'best';
+    if (NOVELTY.test(v.name)) return 'novelty';
+    return 'basic';
+  }
   function score(v) {
-    let s = 0;
-    if (/^de[-_]DE/i.test(v.lang)) s += 50; else if (/^de/i.test(v.lang)) s += 30;
-    if (/natural|premium|enhanced|neural|online/i.test(v.name)) s += 15;
-    const i = PREF.findIndex((p) => v.name.includes(p)); if (i >= 0) s += 12 - Math.min(i, 10);
-    if (v.localService) s += 2;
+    let s = /^de[-_]DE/i.test(v.lang) ? 50 : /^de/i.test(v.lang) ? 30 : 0;
+    if (/google/i.test(v.name)) s += 45;          // Chrome's "Google Deutsch" – clear and natural
+    if (HIGH.test(v.name)) s += 40;               // macOS/iOS Premium & Enhanced, Edge "Natural" voices
+    if (GOOD_NAMES.test(v.name)) s += 10;
+    if (NOVELTY.test(v.name)) s -= 60;
     return s;
   }
   function load() {
@@ -565,6 +573,7 @@ const Speech = (() => {
       if (v) u.voice = v;
       u.rate = clamp((Store.data.settings.rate || 0.9) * (o.rate || 1), 0.3, 1.8);
       u.pitch = o.pitch || 1;
+      u.volume = 1;
       let done = false, started = false;
       alive.add(u); // keep a reference: Chrome can garbage-collect utterances and never fire onend
       const fin = () => { if (!done) { done = true; alive.delete(u); resolve(); } };
@@ -575,20 +584,26 @@ const Speech = (() => {
         speechSynthesis.cancel();
         if (Date.now() - lastWarn > 8000) { lastWarn = Date.now(); fallback(o.label || text, o.phon, true); }
         fin();
-      }, 4000);
-      setTimeout(fin, Math.min(4000 + (text.length * 200) / u.rate, 30000));
+      }, 5000);
+      setTimeout(fin, Math.min(5000 + (text.length * 200) / u.rate, 30000));
+      if (speechSynthesis.paused) speechSynthesis.resume();
       speechSynthesis.speak(u);
     });
   }
   function fallback(text, phon, stuck) {
     toast(`🔇 <b>${stuck ? 'Speech output is not responding' : 'Speech output is not available'}.</b> ${stuck ? 'Check your volume and German voice (⚙️).' : ''}<br>${esc(text)}${phon ? ` → pronounced: <b>[${esc(phon)}]</b>` : ''}`, 'warn', 4500);
   }
+  // Stop whatever is playing. Only cancel when something is actually queued – cancelling an idle
+  // engine and speaking right away can clip the start of short words (single letters, numbers).
+  async function interrupt() {
+    if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); await sleep(180); }
+    else await sleep(20);
+  }
   async function say(text, o = {}) {
-    if (!text) return false;
+    if (text === undefined || text === null || text === '') return false;
     if (!supported) { fallback(o.label || text, o.phon); return false; }
     const my = ++token;
-    speechSynthesis.cancel();
-    await sleep(60);
+    await interrupt();
     if (my !== token) return false;
     setBusy(true);
     await utter(String(text), o);
@@ -599,8 +614,8 @@ const Speech = (() => {
     const list = parts.map((p) => (typeof p === 'string' ? { text: p } : p));
     if (!supported) { fallback(list.map((p) => p.text).join(' · '), o.phon); if (o.onDone) o.onDone(false); return false; }
     const my = ++token;
-    speechSynthesis.cancel();
-    await sleep(60);
+    await interrupt();
+    if (my !== token) return false;
     setBusy(true);
     for (let i = 0; i < list.length; i++) {
       if (my !== token) return false;
@@ -614,12 +629,15 @@ const Speech = (() => {
   }
   function stop() { token++; if (supported) speechSynthesis.cancel(); setBusy(false); }
   function voiceFor(speakerIdx) {
-    if (voices.length > 1) return { voice: voices[speakerIdx % 2 === 0 ? 0 : 1], pitch: 1 };
-    return { voice: voice, pitch: speakerIdx % 2 === 0 ? 1.05 : 0.82 };
+    // Second speaker in dialogues: the next good voice (never a novelty voice); otherwise same voice, lower pitch
+    const other = voices.find((v) => v !== voice && quality(v) !== 'novelty');
+    if (speakerIdx % 2 === 0 || !other) return { voice, pitch: speakerIdx % 2 === 0 ? 1 : 0.85 };
+    return { voice: other, pitch: 1 };
   }
   return {
-    init, say, sequence, stop, voiceFor,
+    init, say, sequence, stop, voiceFor, quality,
     get supported() { return supported; }, get voices() { return voices; }, get voice() { return voice; }, get loaded() { return loaded; },
+    get hasGoodVoice() { return voices.some((v) => quality(v) === 'best'); },
     setVoice(name) { Store.data.settings.voice = name; Store.save(); load(); },
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
   };
@@ -856,10 +874,16 @@ function initSettings() {
   const dlg = $('#settings-dialog');
   const open = () => { fillSettings(); if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', ''); };
   $('#settings-btn').addEventListener('click', open);
+  Speech.onChange(() => { if (dlg.open) fillSettings(); });
   $('#voice-chip').addEventListener('click', open);
   $('#stop-speech').addEventListener('click', () => Speech.stop());
   $('#set-rate').addEventListener('input', (e) => { Store.data.settings.rate = +e.target.value; Store.save(); $('#set-rate-val').textContent = `${Math.round(+e.target.value * 100)} %`; });
-  $('#set-voice').addEventListener('change', (e) => { Speech.setVoice(e.target.value); refreshVoiceChip(); });
+  $('#set-voice').addEventListener('click', (e) => {
+    const t = e.target.closest('[data-try]');
+    if (t) { const v = Speech.voices.find((x) => x.name === t.dataset.try); Speech.say(VOICE_SAMPLE, { voice: v }); return; }
+    const p = e.target.closest('[data-pick]');
+    if (p) { Speech.setVoice(p.dataset.pick); refreshVoiceChip(); fillSettings(); Speech.say(VOICE_SAMPLE); }
+  });
   $('#set-test').addEventListener('click', () => Speech.say('Guten Tag! Wie geht es Ihnen? Ich heiße Anna und ich komme aus Berlin.'));
   $('#set-export').addEventListener('click', () => {
     const blob = new Blob([JSON.stringify(Store.data, null, 2)], { type: 'application/json' });
@@ -880,14 +904,24 @@ function initSettings() {
     if (window.confirm('Really delete all your progress? This cannot be undone.')) { Store.reset(); toast('Progress reset.', 'info'); dlg.close(); route(); }
   });
 }
+const VOICE_SAMPLE = 'Guten Tag! A, B, C, D. Eins, zwei, drei. 45.';
+const VOICE_HELP = 'For a much clearer voice: <b>Chrome</b> on a computer offers “Google Deutsch” automatically. <b>Mac:</b> System Settings → Accessibility → Spoken Content → System voice → Manage Voices… → German → download a <b>(Premium)</b> or <b>(Enhanced)</b> voice (e.g. Anna, Petra, Markus, Yannick), then reload this page. <b>iPhone/iPad:</b> Settings → Accessibility → Spoken Content → Voices → German → download an Enhanced voice. <b>Windows:</b> use Microsoft Edge (its “Natural” German voices are very clear).';
 function fillSettings() {
   $('#set-rate').value = Store.data.settings.rate; $('#set-rate-val').textContent = `${Math.round(Store.data.settings.rate * 100)} %`;
-  const sel = $('#set-voice'); const hint = $('#set-voice-hint');
-  if (!Speech.supported) { sel.innerHTML = '<option>Not supported</option>'; sel.disabled = true; hint.textContent = 'Your browser does not support the Web Speech API. The app shows a phonetic spelling instead.'; return; }
-  if (!Speech.voices.length) { sel.innerHTML = '<option value="">Browser default voice</option>'; hint.innerHTML = 'No German voice found. <b>Windows:</b> Settings → Time & Language → Language → add German. <b>macOS/iOS:</b> Accessibility → Spoken Content → Voices → German. <b>Android:</b> Google Text-to-speech → install German. Chrome often includes “Google Deutsch”.'; return; }
-  sel.disabled = false;
-  sel.innerHTML = Speech.voices.map((v) => `<option value="${esc(v.name)}" ${Speech.voice && v.name === Speech.voice.name ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('');
-  hint.textContent = `${Speech.voices.length} German voice(s) found.`;
+  const list = $('#set-voice'); const hint = $('#set-voice-hint');
+  if (!Speech.supported) { list.innerHTML = '<div class="text-sm text-slate-500">Not supported in this browser.</div>'; hint.textContent = 'Your browser does not support the Web Speech API. The app shows a phonetic spelling instead.'; return; }
+  if (!Speech.voices.length) { list.innerHTML = '<div class="text-sm text-slate-500">No German voice found – the browser will use its default voice.</div>'; hint.innerHTML = VOICE_HELP; return; }
+  const tag = { best: ['⭐ clear', 'badge-green'], basic: ['basic', 'badge-slate'], novelty: ['novelty', 'badge-red'] };
+  list.innerHTML = Speech.voices.map((v) => {
+    const q = Speech.quality(v); const on = Speech.voice && v.name === Speech.voice.name;
+    return `<div class="flex items-center gap-2 rounded-xl border px-3 py-2 ${on ? 'border-slate-800 bg-slate-50' : 'border-slate-200'}">
+      <button type="button" class="flex-1 min-w-0 text-left flex items-center gap-2" data-pick="${esc(v.name)}" role="radio" aria-checked="${on}">
+        <span class="w-4 h-4 rounded-full border-2 ${on ? 'border-slate-800 bg-slate-800' : 'border-slate-300'} shrink-0"></span>
+        <span class="truncate text-sm font-semibold">${esc(v.name)}</span><span class="badge ${tag[q][1]} shrink-0">${tag[q][0]}</span></button>
+      <button type="button" class="btn btn-ghost btn-sm !px-2.5" data-try="${esc(v.name)}" aria-label="Try ${esc(v.name)}">▶ Try</button></div>`;
+  }).join('');
+  hint.innerHTML = Speech.hasGoodVoice ? `${Speech.voices.length} German voice(s) found. Voices marked ⭐ sound the most natural.` : `Only basic German voices were found on this device. ${VOICE_HELP}`;
+
 }
 
 /* =====================================================================
@@ -926,7 +960,8 @@ const ALPHA = [
   { L: 'Ü', ph: 'ü', tip: 'Umlaut: lips very round and pushed forward, tongue says “ee” (über, Tür).', ex: [['über', 'over'], ['Tür', 'door'], ['Menü', 'menu']], cls: 'umlaut' },
   { L: 'ß', ph: 'ess-tsett', tip: '“Eszett”: always a sharp s – after a long vowel or diphthong (Straße, groß). No word starts with ß.', ex: [null, ['Straße', 'street'], ['groß', 'big']], cls: 'eszett' }
 ];
-const LETTER_SAY = { A: 'A', B: 'Beh', C: 'Zeh', D: 'Deh', E: 'E', F: 'Eff', G: 'Geh', H: 'Hah', I: 'I', J: 'Jott', K: 'Kah', L: 'Ell', M: 'Emm', N: 'Enn', O: 'O', P: 'Peh', Q: 'Kuh', R: 'Err', S: 'Ess', T: 'Teh', U: 'U', V: 'Vau', W: 'Weh', X: 'Iks', Y: 'Ypsilon', Z: 'Zett', 'Ä': 'Ä', 'Ö': 'Ö', 'Ü': 'Ü', 'ß': 'Eszett' };
+// Letters are spoken as plain capitals – German voices read single letters as their proper letter names
+const LETTER_SAY = Object.fromEntries('ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÜ'.split('').map((c) => [c, c]).concat([['ß', 'Eszett']]));
 const LETTER_PH = Object.fromEntries(ALPHA.map((a) => [a.L, a.ph]));
 const SPELL_WORDS = [
   ['BERLIN', 'capital of Germany'], ['ANNA', 'a first name'], ['DEUTSCH', 'German'], ['MÜLLER', 'a family name'],
@@ -1189,10 +1224,10 @@ function numZerleger(el) {
       <div class="eyebrow">Click to listen</div>
       <h2 class="section-title mb-3">0 – 20 & the tens</h2>
       <div class="grid grid-cols-4 sm:grid-cols-5 gap-2">
-        ${Array.from({ length: 21 }, (_, i) => `<button class="say-word flex-col !items-center !gap-0 py-2" data-num="${i}" data-say="${numDe(i)}"><span class="font-display text-xl font-bold">${i}</span><span class="en">${numDe(i)}</span></button>`).join('')}
+        ${Array.from({ length: 21 }, (_, i) => `<button class="say-word flex-col !items-center !gap-0 py-2" data-num="${i}" data-say="${i}"><span class="font-display text-xl font-bold">${i}</span><span class="en">${numDe(i)}</span></button>`).join('')}
       </div>
       <div class="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-3">
-        ${[30, 40, 50, 60, 70, 80, 90, 100].map((i) => `<button class="say-word flex-col !items-center !gap-0 py-2" data-num="${i}" data-say="${numDe(i)}"><span class="font-display text-xl font-bold">${i}</span><span class="en">${numDe(i)}</span></button>`).join('')}
+        ${[30, 40, 50, 60, 70, 80, 90, 100].map((i) => `<button class="say-word flex-col !items-center !gap-0 py-2" data-num="${i}" data-say="${i}"><span class="font-display text-xl font-bold">${i}</span><span class="en">${numDe(i)}</span></button>`).join('')}
       </div>
       <div class="rule-box mt-4 text-sm">Above 20: <b>ones + und + tens</b>.<br>21 = ein<b>und</b>zwanzig · 32 = zwei<b>und</b>dreißig · 45 = fünf<b>und</b>vierzig</div>
     </aside>
@@ -1216,19 +1251,19 @@ function numZerleger(el) {
         <button class="btn btn-gold" id="z-step">👣 Step by step</button>
       </div>
       <ul class="mt-5 space-y-2 text-sm">${numberNotes(n).map((t) => `<li class="rule-box">${t}</li>`).join('')}</ul>`;
-    $('#z-say', out).onclick = () => Speech.say(word);
+    $('#z-say', out).onclick = () => Speech.say(String(n));
     $('#z-step', out).onclick = () => Speech.sequence(parts.map((p) => ({ text: p.t, rate: 0.85 })), {
       gap: 250, onPart: (i) => $$('#z-parts .part', out).forEach((x, k) => x.classList.toggle('now', k === i)),
-      onDone: () => { $$('#z-parts .part', out).forEach((x) => x.classList.remove('now')); Speech.say(word); }
+      onDone: () => { $$('#z-parts .part', out).forEach((x) => x.classList.remove('now')); Speech.say(String(n)); }
     });
-    if (speak) Speech.say(word);
+    if (speak) Speech.say(String(n));
   }
   const numIn = $('#z-num', el), slider = $('#z-slider', el);
   function set(v, speak = false) { n = clamp(Math.floor(+v || 0), 0, 9999); numIn.value = n; slider.value = Math.min(n, 100); draw(speak); }
   numIn.addEventListener('input', () => { if (numIn.value !== '') set(numIn.value); });
   numIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') set(numIn.value, true); });
   slider.addEventListener('input', () => set(slider.value));
-  slider.addEventListener('change', () => Speech.say(numDe(n)));
+  slider.addEventListener('change', () => Speech.say(String(n)));
   $$('[data-d]', el).forEach((b) => (b.onclick = () => set(n + +b.dataset.d, true)));
   $('#z-rand', el).onclick = () => set(21 + rand(79), true);
   $('#z-big', el).onclick = () => set(101 + rand(9898), true);
@@ -1289,7 +1324,7 @@ function numMathe(el) {
       <div class="flex-1 flex flex-wrap items-center gap-2 text-lg">
         <span class="font-semibold">${numDe(p.a)}</span><span class="font-bold text-slate-400">${p.op}</span><span class="font-semibold">${numDe(p.b)}</span><span class="font-bold">=</span>
         <input class="blank text-left" style="width:13rem" data-i="${i}" autocomplete="off" spellcheck="false" aria-label="Result ${i + 1}">
-        ${sayBtn(`${numDe(p.a)} ${opWord[p.op]} ${numDe(p.b)} ist?`, 'Listen to the problem')}
+        ${sayBtn(`${p.a} ${opWord[p.op]} ${p.b} ist?`, 'Listen to the problem')}
         <div class="w-full text-sm sol"></div>
       </div></div>`).join('');
     $('#m-res', el).innerHTML = '';
@@ -1307,13 +1342,13 @@ function numMathe(el) {
       inp.classList.toggle('ok', r.ok); inp.classList.toggle('bad', !r.ok);
       row.classList.toggle('ok', r.ok); row.classList.toggle('bad', !r.ok);
       if (r.ok) { ok++; sol.innerHTML = r.note ? `<div class="ex-sol ok">${r.note}</div>` : ''; }
-      else sol.innerHTML = `<div class="ex-sol bad">${r.digit ? 'Please write it as a <b>word</b>! ' : r.empty ? 'Still empty. ' : ''}${p.a} ${p.op} ${p.b} = ${res} → <b>${numDe(res)}</b> ${sayBtn(numDe(res))}</div>`;
+      else sol.innerHTML = `<div class="ex-sol bad">${r.digit ? 'Please write it as a <b>word</b>! ' : r.empty ? 'Still empty. ' : ''}${p.a} ${p.op} ${p.b} = ${res} → <b>${numDe(res)}</b> ${sayBtn(String(res))}</div>`;
     });
     const p = pct(ok, probs.length);
     $('#m-res', el).innerHTML = `<div class="rule-box ${p === 100 ? '' : 'dark'}"><b>${ok} / ${probs.length} correct (${p} %)</b> ${p === 100 ? '– Excellent! 🎉' : p >= 60 ? '– Well done!' : '– Practice makes perfect.'}</div>`;
     if (p === 100) confetti();
   };
-  $('#m-show', el).onclick = () => probs.forEach((p, i) => { const res = calc(p.a, p.op, p.b); const inp = $(`input[data-i="${i}"]`, list); $('.sol', inp.closest('.ex-item')).innerHTML = `<div class="ex-sol info">= ${res} → <b>${numDe(res)}</b> ${sayBtn(numDe(res))}</div>`; });
+  $('#m-show', el).onclick = () => probs.forEach((p, i) => { const res = calc(p.a, p.op, p.b); const inp = $(`input[data-i="${i}"]`, list); $('.sol', inp.closest('.ex-item')).innerHTML = `<div class="ex-sol info">= ${res} → <b>${numDe(res)}</b> ${sayBtn(String(res))}</div>`; });
   draw();
 }
 
@@ -1349,7 +1384,7 @@ function numHoeren(el) {
   function nextQ() {
     if (round.q >= 10) return finish();
     const [lo, hi] = ranges[rk]; round.n = lo + rand(hi - lo + 1); round.opts = distractors(round.n, ranges[rk]); round.answered = false; round.q++;
-    draw(); Speech.say(numDe(round.n));
+    draw(); Speech.say(String(round.n));
   }
   function draw() {
     box.innerHTML = `<div class="flex flex-wrap items-start justify-between gap-3 mb-4">
@@ -1363,7 +1398,7 @@ function numHoeren(el) {
       : `<div class="text-center py-8"><div class="text-6xl mb-3">👂</div><p class="text-slate-600 mb-5 max-w-md mx-auto">The app says a German number. Click the matching digits. 10 questions per round.</p><button class="btn btn-gold btn-lg" id="lq-start">▶ Start round</button><div class="text-sm text-slate-500 mt-3">Best (${ranges[rk][2]}): ${saved()}/10</div></div>`}`;
     $$('[data-rk]', box).forEach((b) => (b.onclick = () => { rk = b.dataset.rk; round = null; draw(); }));
     if (!round) { $('#lq-start', box).onclick = start; return; }
-    $('#lq-rep', box).onclick = () => Speech.say(numDe(round.n));
+    $('#lq-rep', box).onclick = () => Speech.say(String(round.n));
     $('#lq-slow', box).onclick = () => Speech.say(numDe(round.n), { rate: 0.6 });
     $('#lq-opts', box).addEventListener('click', (e) => {
       const b = e.target.closest('[data-v]'); if (!b || round.answered) return;
@@ -1371,7 +1406,7 @@ function numHoeren(el) {
       $$('.opt-num', box).forEach((x) => { x.disabled = true; if (+x.dataset.v === round.n) x.classList.add('ok'); });
       if (!good) b.classList.add('bad');
       if (good) { round.ok++; round.streak++; } else round.streak = 0;
-      $('#lq-fb', box).innerHTML = `<div class="ex-sol ${good ? 'ok' : 'bad'}">${good ? '✅ Correct!' : '❌ Sorry, wrong.'} <b>${round.n}</b> = ${numDe(round.n)} ${sayBtn(numDe(round.n))}</div>`;
+      $('#lq-fb', box).innerHTML = `<div class="ex-sol ${good ? 'ok' : 'bad'}">${good ? '✅ Correct!' : '❌ Sorry, wrong.'} <b>${round.n}</b> = ${numDe(round.n)} ${sayBtn(String(round.n))}</div>`;
       setTimeout(nextQ, good ? 1100 : 2200);
     });
   }
@@ -3934,7 +3969,7 @@ Views.start = {
     const drawVoice = () => {
       const v = Speech.voice;
       vc.innerHTML = `<div class="eyebrow">Audio check</div><h3 class="font-display text-lg font-bold mt-1">${!Speech.supported ? '🔇 No speech output' : v ? '🔊 German voice active' : Speech.loaded ? '⚠️ No German voice' : '⏳ Loading voices …'}</h3>
-        <p class="text-sm text-slate-600 mt-1">${!Speech.supported ? 'Your browser does not support the Web Speech API. The app shows the phonetic spelling instead.' : v ? `${esc(v.name)} (${esc(v.lang)}). You can change the voice and speed in the settings.` : 'Install a German voice in your operating system so the pronunciation is right (details in settings ⚙️).'}</p>
+        <p class="text-sm text-slate-600 mt-1">${!Speech.supported ? 'Your browser does not support the Web Speech API. The app shows the phonetic spelling instead.' : v ? `${esc(v.name)} (${esc(v.lang)}). ${Speech.quality(v) === 'best' ? 'You can change the voice and speed in the settings.' : '<b>This is a basic voice and may sound unclear.</b> Open ⚙️ Settings to try the other voices or to see how to get a clearer one.'}` : 'Install a German voice in your operating system so the pronunciation is right (details in settings ⚙️).'}</p>
         <div class="flex gap-2 mt-3"><button class="btn btn-dark btn-sm" data-say="Guten Tag! Wie geht es Ihnen? Ich heiße Anna.">▶ Test</button><button class="btn btn-ghost btn-sm" onclick="document.getElementById('settings-btn').click()">⚙️ Settings</button></div>`;
     };
     drawVoice();
